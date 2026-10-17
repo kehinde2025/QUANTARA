@@ -1,4 +1,6 @@
+import { sql } from "drizzle-orm";
 import {
+  check,
   index,
   pgEnum,
   pgTable,
@@ -15,7 +17,7 @@ export const users = pgTable(
   "users",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    email: text("email").notNull(), // always stored lowercase by the app
+    email: text("email").notNull(), // always stored lowercase; the database enforces it
     emailVerifiedAt: timestamp("email_verified_at", { withTimezone: true }),
     passwordHash: text("password_hash").notNull(),
     role: userRole("role").notNull().default("user"),
@@ -23,7 +25,10 @@ export const users = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [uniqueIndex("users_email_unique").on(t.email)],
+  (t) => [
+    uniqueIndex("users_email_unique").on(t.email),
+    check("users_email_lowercase", sql`${t.email} = lower(${t.email})`),
+  ],
 ).enableRLS();
 
 export const userSessions = pgTable(
