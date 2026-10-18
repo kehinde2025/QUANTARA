@@ -1,15 +1,23 @@
-export default function Home() {
+import Link from "next/link";
+
+export default function HomePage() {
   return (
-    <main className="flex min-h-screen items-center justify-center px-4">
-      <div className="w-full max-w-md rounded-2xl border border-gold/30 bg-charcoal p-8 text-center">
-        <p className="text-xs uppercase tracking-widest text-muted">
-          Development placeholder
-        </p>
-        <h1 className="mt-3 text-4xl font-semibold text-gold">Quantara</h1>
-        <p className="mt-2 text-champagne">Intelligence in Every Trade.</p>
-        <p className="mt-6 text-sm text-muted">
-          Stage 1 foundation. No trading features yet.
-        </p>
+    <main className="mx-auto flex min-h-dvh w-full max-w-sm flex-col justify-center px-4 py-10 text-center">
+      <h1 className="text-4xl font-semibold text-gold">Quantara</h1>
+      <p className="mb-10 mt-2 text-muted">Intelligence in Every Trade.</p>
+      <div className="space-y-3">
+        <Link
+          href="/register"
+          className="block rounded-lg bg-gold px-4 py-3 font-semibold text-ink hover:bg-champagne"
+        >
+          Create account
+        </Link>
+        <Link
+          href="/login"
+          className="block rounded-lg border border-white/10 px-4 py-3 text-white hover:border-gold"
+        >
+          Log in
+        </Link>
       </div>
     </main>
   );
