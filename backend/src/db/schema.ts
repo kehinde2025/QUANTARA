@@ -12,6 +12,8 @@ import {
 
 export const userRole = pgEnum("user_role", ["user", "admin"]);
 export const userStatus = pgEnum("user_status", ["active", "suspended"]);
+export const connectionStatus = pgEnum("connection_status", ["active", "invalid"]);
+
 
 export const users = pgTable(
   "users",
@@ -48,4 +50,21 @@ export const userSessions = pgTable(
     index("user_sessions_user_id_idx").on(t.userId),
     index("user_sessions_expires_at_idx").on(t.expiresAt),
   ],
+).enableRLS();
+
+// One saved Deriv token per user. The token is stored ENCRYPTED, never as plain text.
+export const derivConnections = pgTable(
+  "deriv_connections",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    encryptedToken: text("encrypted_token").notNull(),
+    status: connectionStatus("status").notNull().default("active"),
+    selectedAccountId: text("selected_account_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    lastVerifiedAt: timestamp("last_verified_at", { withTimezone: true }),
+  },
+  (t) => [uniqueIndex("deriv_connections_user_unique").on(t.userId)],
 ).enableRLS();
