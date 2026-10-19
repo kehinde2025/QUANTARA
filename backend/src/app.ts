@@ -5,6 +5,7 @@ import type { ErrorRequestHandler } from "express";
 import { FRONTEND_ORIGIN, IS_PRODUCTION } from "./config.js";
 import { originCheck } from "./middleware/originCheck.js";
 import { authRouter } from "./routes/auth.js";
+import { derivRouter } from "./routes/deriv.js";
 
 export function createApp() {
   const app = express();
@@ -21,6 +22,7 @@ export function createApp() {
   });
 
   app.use("/auth", authRouter);
+  app.use("/deriv", derivRouter);
 
   app.use((_req, res) => {
     res.status(404).json({ error: "Not found" });
