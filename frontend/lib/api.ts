@@ -44,3 +44,38 @@ export const login = (email: string, password: string) =>
 export const logout = () => call<void>("/auth/logout", { method: "POST" });
 
 export const me = () => call<{ user: User }>("/auth/me");
+
+// ---- Deriv connection ----
+
+export type DerivAccount = {
+  accountId: string;
+  accountType: "demo" | "real";
+  currency: string;
+  balance: string;
+  status: string;
+};
+
+export type ConnectionInfo = {
+  status: "active" | "invalid";
+  selectedAccountId: string | null;
+  lastVerifiedAt: string | null;
+};
+
+export const getConnection = () => call<{ connection: ConnectionInfo | null }>("/deriv/connection");
+
+export const getDerivAccounts = () =>
+  call<{ accounts: DerivAccount[]; selectedAccountId: string | null }>("/deriv/accounts");
+
+export const connectDeriv = (token: string) =>
+  call<{ accounts: DerivAccount[]; selectedAccountId: string | null }>("/deriv/connect", {
+    method: "POST",
+    body: JSON.stringify({ token }),
+  });
+
+export const selectDerivAccount = (accountId: string) =>
+  call<{ selectedAccountId: string }>("/deriv/select", {
+    method: "POST",
+    body: JSON.stringify({ accountId }),
+  });
+
+export const disconnectDeriv = () => call<void>("/deriv/connection", { method: "DELETE" });

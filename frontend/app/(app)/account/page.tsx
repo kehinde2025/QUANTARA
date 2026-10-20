@@ -1,6 +1,7 @@
 "use client";
 
-import { Card, EmptyState, PageHeader } from "@/components/ui";
+import DerivConnect from "@/components/DerivConnect";
+import { Card, PageHeader } from "@/components/ui";
 import { useUser } from "@/components/AppShell";
 
 export default function AccountPage() {
@@ -13,11 +14,7 @@ export default function AccountPage() {
         <p className="mt-1 break-all">{user?.email}</p>
       </Card>
       <div className="mt-4">
-        <EmptyState
-          title="Connected Deriv accounts"
-          body="Connecting your Deriv account, choosing between demo and real, and disconnecting will live here."
-          stage="Stage 5"
-        />
+        <DerivConnect />
       </div>
     </>
   );
