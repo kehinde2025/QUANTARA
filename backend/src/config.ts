@@ -7,3 +7,5 @@ export const IS_TEST = process.env.NODE_ENV === "test";
 
 export const DERIV_API_BASE = process.env.DERIV_API_BASE ?? "https://api.derivws.com";
 export const DERIV_APP_ID = process.env.DERIV_APP_ID ?? "";
+export const DERIV_PUBLIC_WS_URL =
+  process.env.DERIV_PUBLIC_WS_URL ?? "wss://api.derivws.com/trading/v1/options/ws/public";

@@ -6,6 +6,7 @@ import { FRONTEND_ORIGIN, IS_PRODUCTION } from "./config.js";
 import { originCheck } from "./middleware/originCheck.js";
 import { authRouter } from "./routes/auth.js";
 import { derivRouter } from "./routes/deriv.js";
+import { marketRouter } from "./routes/market.js";
 
 export function createApp() {
   const app = express();
@@ -23,6 +24,7 @@ export function createApp() {
 
   app.use("/auth", authRouter);
   app.use("/deriv", derivRouter);
+  app.use("/market", marketRouter);
 
   app.use((_req, res) => {
     res.status(404).json({ error: "Not found" });
