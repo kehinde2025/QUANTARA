@@ -79,3 +79,47 @@ export const selectDerivAccount = (accountId: string) =>
   });
 
 export const disconnectDeriv = () => call<void>("/deriv/connection", { method: "DELETE" });
+
+// ---- Market data ----
+
+export type FeedStatus = "connecting" | "open" | "closed";
+
+export type SymbolInfo = {
+  symbol: string;
+  name: string;
+  market: string;
+  submarket: string;
+  type: string;
+  exchangeIsOpen: boolean;
+  tradingSuspended: boolean;
+};
+
+export type PricePoint = { epoch: number; quote: number };
+
+export type HistoryResponse = {
+  symbol: string;
+  decimals: number;
+  ticks: PricePoint[];
+  stale: boolean;
+  feed: FeedStatus;
+};
+
+export type MarketState = {
+  feed: FeedStatus;
+  silentForMs: number | null;
+  latest: { quote: number; epoch: number; decimals: number } | null;
+  ageMs: number | null;
+  stale: boolean;
+};
+
+export const getSymbols = () => call<{ symbols: SymbolInfo[] }>("/market/symbols");
+
+export const getHistory = (symbol: string, count = 300) =>
+  call<HistoryResponse>(`/market/history?symbol=${encodeURIComponent(symbol)}&count=${count}`);
+
+// Live prices. The browser keeps the login cookie; no Deriv credential is involved.
+export function openPriceStream(symbol: string): EventSource {
+  return new EventSource(`${API_URL}/market/stream?symbol=${encodeURIComponent(symbol)}`, {
+    withCredentials: true,
+  });
+}
