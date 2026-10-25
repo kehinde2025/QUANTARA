@@ -7,6 +7,7 @@ vi.mock("../market/index.js", () => ({
   marketService: {
     getSymbols: vi.fn(),
     getHistory: vi.fn(),
+    getContractTypes: vi.fn(),
     snapshot: vi.fn(),
     watch: vi.fn(() => () => {}),
   },
@@ -47,6 +48,7 @@ beforeAll(async () => {
 beforeEach(() => {
   vi.mocked(marketService.getSymbols).mockReset();
   vi.mocked(marketService.getHistory).mockReset();
+  vi.mocked(marketService.getContractTypes).mockReset();
   vi.mocked(marketService.snapshot).mockReset();
 });
 
@@ -59,6 +61,7 @@ describe("market routes", () => {
   it("needs a login on every market route", async () => {
     expect((await request(app).get("/market/symbols")).status).toBe(401);
     expect((await request(app).get("/market/history?symbol=R_100")).status).toBe(401);
+    expect((await request(app).get("/market/contracts?symbol=R_100")).status).toBe(401);
     expect((await request(app).get("/market/stream?symbol=R_100")).status).toBe(401);
   });
 
@@ -117,6 +120,41 @@ describe("market routes", () => {
     expect(res.body.ticks).toEqual([{ epoch: 1, quote: 100 }]);
     expect(res.body.stale).toBe(true);
     expect(marketService.getHistory).toHaveBeenCalledWith("R_100", 300);
+  });
+
+  it("returns the contract types for a symbol", async () => {
+    vi.mocked(marketService.getContractTypes).mockResolvedValue([
+      {
+        contractType: "CALL",
+        category: "callput",
+        sentiment: "up",
+        barriers: 1,
+        durations: [{ expiryType: "tick", min: "1t", max: "10t" }],
+        growthRates: null,
+        lastDigits: null,
+      },
+    ]);
+    const agent = await loggedInAgent();
+    const res = await agent.get("/market/contracts?symbol=R_100");
+    expect(res.status).toBe(200);
+    expect(res.body.contracts[0].contractType).toBe("CALL");
+    expect(marketService.getContractTypes).toHaveBeenCalledWith("R_100");
+  });
+
+  it("rejects an invalid symbol for contract types", async () => {
+    const agent = await loggedInAgent();
+    expect((await agent.get("/market/contracts?symbol=bad%20symbol!")).status).toBe(400);
+    expect(marketService.getContractTypes).not.toHaveBeenCalled();
+  });
+
+  it("returns 503 without leaking details when contract types are unavailable", async () => {
+    vi.mocked(marketService.getContractTypes).mockRejectedValue(
+      new MarketError("unavailable", "hidden detail"),
+    );
+    const agent = await loggedInAgent();
+    const res = await agent.get("/market/contracts?symbol=R_100");
+    expect(res.status).toBe(503);
+    expect(JSON.stringify(res.body)).not.toContain("hidden detail");
   });
 
   it("rejects an invalid symbol on the stream", async () => {

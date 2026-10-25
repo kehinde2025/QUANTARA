@@ -3,12 +3,15 @@ import { DERIV_PUBLIC_WS_URL } from "../config.js";
 import { PublicFeed, toDecimals } from "./publicFeed.js";
 import type { FeedStatus, Reply, Tick } from "./publicFeed.js";
 import { TickStore } from "./tickStore.js";
+import { contractsForReply, summarizeContracts } from "./contracts.js";
+import type { ContractTypeSummary } from "./contracts.js";
 import type { StoredTick } from "./tickStore.js";
 
 // A price older than this is stale. Synthetic indices tick every 1 to 2 seconds.
 export const STALE_AFTER_MS = 15_000;
 const SYMBOLS_TTL_MS = 5 * 60_000;
 const HISTORY_TTL_MS = 10_000;
+const CONTRACTS_TTL_MS = 5 * 60_000;
 const UNWATCH_GRACE_MS = 30_000;
 
 export type SymbolInfo = {
@@ -60,6 +63,7 @@ export class MarketService {
   private readonly feed: PublicFeed;
   private symbolsCache: { at: number; data: SymbolInfo[] } | null = null;
   private readonly historyFetchedAt = new Map<string, number>();
+  private readonly contractsCache = new Map<string, { at: number; data: ContractTypeSummary[] }>();
   private readonly listeners = new Map<string, Set<(e: MarketEvent) => void>>();
   private readonly unwatchTimers = new Map<string, NodeJS.Timeout>();
 
@@ -136,7 +140,22 @@ export class MarketService {
     this.historyFetchedAt.set(key, now);
     return this.fromStore(symbol, count);
   }
+  // Which contract types Deriv lists for this market right now. Information
+  // only: the bots must re-check the live list before every purchase.
+  async getContractTypes(symbol: string): Promise<ContractTypeSummary[]> {
+    const now = Date.now();
+    const cached = this.contractsCache.get(symbol);
+    if (cached && now - cached.at < CONTRACTS_TTL_MS) return cached.data;
 
+    const reply = await this.ask({ contracts_for: symbol });
+    const parsed = contractsForReply.safeParse(reply);
+    if (!parsed.success) throw new MarketError("unexpected", "Unexpected reply for contracts");
+
+    const data = summarizeContracts(parsed.data.contracts_for.available);
+    if (this.contractsCache.size > 200) this.contractsCache.clear();
+    this.contractsCache.set(symbol, { at: now, data });
+    return data;
+  }
   // Shared live subscription: one Deriv stream per symbol however many watch it.
   // Released 30 seconds after the last watcher leaves.
   watch(symbol: string, listener: (e: MarketEvent) => void): () => void {

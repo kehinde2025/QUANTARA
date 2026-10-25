@@ -71,7 +71,19 @@ marketRouter.get("/history", apiLimiter, async (req, res) => {
     sendMarketError(res, error);
   }
 });
-
+marketRouter.get("/contracts", apiLimiter, async (req, res) => {
+  const parsed = z.object({ symbol: symbolSchema }).safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid symbol." });
+    return;
+  }
+  try {
+    const contracts = await marketService.getContractTypes(parsed.data.symbol);
+    res.json({ symbol: parsed.data.symbol, contracts });
+  } catch (error) {
+    sendMarketError(res, error);
+  }
+});
 // Live prices over Server-Sent Events. A "state" event (including the stale
 // flag) is sent at the start, on connection changes, and every 3 seconds.
 marketRouter.get("/stream", (req, res) => {
