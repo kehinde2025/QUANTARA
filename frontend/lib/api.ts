@@ -123,3 +123,20 @@ export function openPriceStream(symbol: string): EventSource {
     withCredentials: true,
   });
 }
+
+// ---- Contract types per market ----
+
+export type ContractTypeSummary = {
+  contractType: string;
+  category: string;
+  sentiment: string | null;
+  barriers: number | null;
+  durations: { expiryType: string; min: string; max: string }[];
+  growthRates: number[] | null;
+  lastDigits: number[] | null;
+};
+
+export const getContractTypes = (symbol: string) =>
+  call<{ symbol: string; contracts: ContractTypeSummary[] }>(
+    `/market/contracts?symbol=${encodeURIComponent(symbol)}`,
+  );
