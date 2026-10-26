@@ -1,13 +1,16 @@
 import { sql } from "drizzle-orm";
 import {
+  bigint,
   check,
   index,
+  integer,
+  jsonb,
   pgEnum,
   pgTable,
+  text,
   timestamp,
   uniqueIndex,
   uuid,
-  text,
 } from "drizzle-orm/pg-core";
 
 export const userRole = pgEnum("user_role", ["user", "admin"]);
@@ -67,4 +70,43 @@ export const derivConnections = pgTable(
     lastVerifiedAt: timestamp("last_verified_at", { withTimezone: true }),
   },
   (t) => [uniqueIndex("deriv_connections_user_unique").on(t.userId)],
+).enableRLS();
+
+export const signalStatus = pgEnum("signal_status", [
+  "new",
+  "valid",
+  "executed",
+  "expired",
+  "cancelled",
+  "rejected",
+  "failed",
+]);
+
+export const signalDirection = pgEnum("signal_direction", ["rise", "fall"]);
+
+// Platform-wide market signals. They describe a market, not a customer.
+// One idea per strategy, market, timeframe and candle: the unique index stops
+// duplicates after a restart.
+export const signals = pgTable(
+  "signals",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    strategy: text("strategy").notNull(),
+    symbol: text("symbol").notNull(),
+    direction: signalDirection("direction").notNull(),
+    contractType: text("contract_type").notNull(),
+    timeframeSeconds: integer("timeframe_seconds").notNull(),
+    candleEpoch: bigint("candle_epoch", { mode: "number" }).notNull(),
+    reason: text("reason").notNull(),
+    details: jsonb("details").$type<Record<string, number>>().notNull(),
+    status: signalStatus("status").notNull().default("valid"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    uniqueIndex("signals_once_per_candle").on(t.strategy, t.symbol, t.timeframeSeconds, t.candleEpoch),
+    index("signals_symbol_created_idx").on(t.symbol, t.createdAt),
+    index("signals_status_expires_idx").on(t.status, t.expiresAt),
+    check("signals_expiry_after_creation", sql`${t.expiresAt} > ${t.createdAt}`),
+  ],
 ).enableRLS();
