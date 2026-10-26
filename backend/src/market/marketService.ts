@@ -6,6 +6,7 @@ import { TickStore } from "./tickStore.js";
 import { contractsForReply, summarizeContracts } from "./contracts.js";
 import type { ContractTypeSummary } from "./contracts.js";
 import type { StoredTick } from "./tickStore.js";
+import type { Candle } from "../strategies/types.js";
 
 // A price older than this is stale. Synthetic indices tick every 1 to 2 seconds.
 export const STALE_AFTER_MS = 15_000;
@@ -56,6 +57,18 @@ const symbolsReply = z.object({
 const historyReply = z.object({
   history: z.object({ prices: z.array(z.number()), times: z.array(z.number()) }),
   pip_size: z.number().optional(),
+});
+
+const candlesReply = z.object({
+  candles: z.array(
+    z.object({
+      epoch: z.number(),
+      open: z.number(),
+      high: z.number(),
+      low: z.number(),
+      close: z.number(),
+    }),
+  ),
 });
 
 export class MarketService {
@@ -139,6 +152,22 @@ export class MarketService {
     if (this.historyFetchedAt.size > 200) this.historyFetchedAt.clear();
     this.historyFetchedAt.set(key, now);
     return this.fromStore(symbol, count);
+  }
+
+
+    // Recent candles from Deriv (granularity in seconds, for example 60).
+  // The newest one may still be forming.
+  async getCandles(symbol: string, count: number, granularity: number): Promise<Candle[]> {
+    const reply = await this.ask({ ticks_history: symbol, end: "latest", count, style: "candles", granularity });
+    const parsed = candlesReply.safeParse(reply);
+    if (!parsed.success) throw new MarketError("unexpected", "Unexpected reply for candles");
+    return parsed.data.candles.map((c) => ({
+      epoch: c.epoch,
+      open: c.open,
+      high: c.high,
+      low: c.low,
+      close: c.close,
+    }));
   }
   // Which contract types Deriv lists for this market right now. Information
   // only: the bots must re-check the live list before every purchase.

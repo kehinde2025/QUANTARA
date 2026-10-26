@@ -13,7 +13,8 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:migrate:test": "tsx src/db/migrateTest.ts",
-    "market:live": "tsx src/market/liveCheck.ts"
+    "market:live": "tsx src/market/liveCheck.ts",
+    "signals:replay": "tsx src/signals/replayCheck.ts"
   },
   "dependencies": {
     "argon2": "^0.45.1",
