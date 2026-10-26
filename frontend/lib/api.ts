@@ -140,3 +140,22 @@ export const getContractTypes = (symbol: string) =>
   call<{ symbol: string; contracts: ContractTypeSummary[] }>(
     `/market/contracts?symbol=${encodeURIComponent(symbol)}`,
   );
+
+
+// ---- Signals ----
+
+export type SignalView = {
+  id: string;
+  strategy: string;
+  symbol: string;
+  direction: "rise" | "fall";
+  contractType: string;
+  timeframeSeconds: number;
+  reason: string;
+  details: Record<string, number>;
+  status: "new" | "valid" | "executed" | "expired" | "cancelled" | "rejected" | "failed";
+  createdAt: string;
+  expiresAt: string;
+};
+
+export const getSignals = (limit = 50) => call<{ signals: SignalView[] }>(`/signals?limit=${limit}`);

@@ -98,11 +98,15 @@ export default function DashboardPage() {
       ) : null}
 
       <div className="mt-4 grid gap-3 lg:grid-cols-2">
-        <EmptyState
-          title="Recent signals"
-          body="Signals will appear here once the strategy engine is built. Nothing is shown until real signals exist."
-          stage="Stage 7"
-        />
+        <Card>
+          <h2 className="font-medium text-white">Signals</h2>
+          <p className="mt-2 text-sm text-muted">
+            Ideas from simple rules on live prices. Information only; nothing is traded from them.
+          </p>
+          <Link href="/signals" className="mt-3 inline-block text-sm text-gold hover:underline">
+            View signals
+          </Link>
+        </Card>
         <EmptyState
           title="Recent activity"
           body="Your trades and contract results will appear here. Nothing is shown until real trades exist."
