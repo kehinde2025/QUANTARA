@@ -15,3 +15,8 @@ export const SIGNAL_SYMBOLS = (process.env.SIGNAL_SYMBOLS ?? "R_10,R_25,R_50,R_7
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
+  
+  
+// The engine's buying switch. OFF unless this is exactly "true". Even when it is on,
+// nothing can be bought until a real risk engine replaces the placeholder gate.
+export const BUYING_ENABLED = process.env.BUYING_ENABLED === "true";

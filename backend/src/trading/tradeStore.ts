@@ -213,3 +213,13 @@ export async function findIntentsNeedingReconciliation(olderThan: Date): Promise
 export async function listEvents(intentId: string) {
   return db.select().from(tradeEvents).where(eq(tradeEvents.intentId, intentId)).orderBy(asc(tradeEvents.createdAt));
 }
+
+// Finds a contract by the account it belongs to and its Deriv id.
+export async function findContractByDerivId(accountId: string, derivContractId: number): Promise<Contract | null> {
+  const [row] = await db
+    .select()
+    .from(contracts)
+    .where(and(eq(contracts.accountId, accountId), eq(contracts.derivContractId, derivContractId)))
+    .limit(1);
+  return row ?? null;
+}
