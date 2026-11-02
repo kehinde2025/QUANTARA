@@ -1,4 +1,4 @@
-import { and, asc, eq, lt, or } from "drizzle-orm";
+import { and, asc, eq, inArray, lt, or } from "drizzle-orm";
 import { db } from "../db/client.js";
 import { contracts, tradeEvents, tradeIntents } from "../db/schema.js";
 import type { ContractReading } from "./contractState.js";
@@ -222,4 +222,13 @@ export async function findContractByDerivId(accountId: string, derivContractId: 
     .where(and(eq(contracts.accountId, accountId), eq(contracts.derivContractId, derivContractId)))
     .limit(1);
   return row ?? null;
+}
+
+// Contracts that have not finished yet (or whose figures looked wrong), for
+// one account. After a restart the worker follows these again.
+export async function listUnsettledContracts(accountId: string): Promise<Contract[]> {
+  return db
+    .select()
+    .from(contracts)
+    .where(and(eq(contracts.accountId, accountId), inArray(contracts.status, ["open", "awaiting_settlement", "unknown"])));
 }
