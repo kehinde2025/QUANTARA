@@ -1,29 +1,23 @@
-import type { AccountConnection } from "../deriv/accountConnection.js";
-import { Decimal } from "./money.js";
-import { PROFIT_TABLE_PAGE, matchPurchase, parsePortfolio, parseProfitTable } from "./reconcile.js";
-import type { Candidate } from "./reconcile.js";
-import type {
-  Intent,
-  confirmPurchase,
-  findContractByDerivId,
-  findIntentsNeedingReconciliation,
-  moveIntent,
-} from "./tradeStore.js";
+import { Decimal } from "decimal.js";
+import type { LookupResult, PurchaseLookup } from "../deriv/purchaseLookup.js";
+import type { TradeStorePort } from "./engine.js";
+import { matchPurchase } from "./reconcile.js";
+import type { MatchResult } from "./reconcile.js";
+import type { Intent, findIntentsNeedingReconciliation } from "./tradeStore.js";
 
 export type ReconcilerDeps = {
   accountId: string;
-  connection: Pick<AccountConnection, "request" | "getStatus" | "watchContract">;
-  store: {
+  store: Pick<TradeStorePort, "moveIntent" | "confirmPurchase" | "findContractByDerivId"> & {
     findIntentsNeedingReconciliation: typeof findIntentsNeedingReconciliation;
-    moveIntent: typeof moveIntent;
-    confirmPurchase: typeof confirmPurchase;
-    findContractByDerivId: typeof findContractByDerivId;
   };
+  lookup: PurchaseLookup;
+  watchContract: (derivContractId: number) => void;
   now?: () => number;
   log?: (message: string) => void;
-  // An attempt is only checked once it was sent this long ago.
-  settleDelayMs?: number;
-  // "Not bought" is only concluded this long after the buy was sent.
+  // A purchase counts as stuck once it was sent this long ago without an answer.
+  settleAfterMs?: number;
+  // Only after this long, with Deriv's records readable and empty, is a purchase
+  // declared not bought.
   notPurchasedAfterMs?: number;
 };
 
@@ -31,14 +25,14 @@ export type ReconcileSummary = {
   checked: number;
   confirmed: number;
   failed: number;
-  review: number;
-  skipped: number;
+  needsReview: number;
+  waiting: number;
+  errors: number;
 };
 
-type Doubtful = "purchase_sent" | "purchase_uncertain";
-
-// Settles purchases left in doubt by comparing them with Deriv's own records.
-// Whenever anything is unclear it changes nothing and tries again next round.
+// Checks purchases that were left in doubt against Deriv's own records.
+// Rules: a purchase is never sent again; "not bought" is only concluded from
+// readable records after a safe wait; anything unclear goes to a person.
 export class Reconciler {
   private readonly deps: ReconcilerDeps;
 
@@ -48,136 +42,111 @@ export class Reconciler {
 
   async reconcileOnce(): Promise<ReconcileSummary> {
     const d = this.deps;
-    const now = d.now ?? (() => Date.now());
-    const summary: ReconcileSummary = { checked: 0, confirmed: 0, failed: 0, review: 0, skipped: 0 };
-    if (d.connection.getStatus() !== "open") return summary;
+    const nowMs = (d.now ?? (() => Date.now()))();
+    const summary: ReconcileSummary = { checked: 0, confirmed: 0, failed: 0, needsReview: 0, waiting: 0, errors: 0 };
 
-    const cutoff = new Date(now() - (d.settleDelayMs ?? 30_000));
-    const waiting = (await d.store.findIntentsNeedingReconciliation(cutoff)).filter(
-      (i) =>
-        i.accountId === d.accountId &&
-        i.purchaseSentAt !== null &&
-        (i.state === "purchase_sent" || i.state === "purchase_uncertain"),
-    );
-    if (waiting.length === 0) return summary; // no requests to Deriv when nothing needs checking
+    const all = await d.store.findIntentsNeedingReconciliation(new Date(nowMs - (d.settleAfterMs ?? 30_000)));
+    const mine = all.filter((intent) => intent.accountId === d.accountId && intent.userId === d.userId);
+    summary.checked = mine.length;
+    if (mine.length === 0) return summary;
 
-    const earliest = Math.min(...waiting.map((i) => i.purchaseSentAt!.getTime()));
-    const candidates = await this.fetchCandidates(Math.floor(earliest / 1000) - 60);
-    if (!candidates) {
-      this.log("could not read Deriv's records completely; every attempt stays as it is");
+    const earliest = Math.min(...mine.map((i) => (i.purchaseSentAt ?? i.createdAt).getTime()));
+    let lookup: LookupResult;
+    try {
+      lookup = await d.lookup(earliest - 120_000, nowMs);
+    } catch {
+      lookup = { ok: false, reason: "lookup_failed" };
+    }
+    if (!lookup.ok) {
+      this.log(`could not read Deriv's records (${lookup.reason}); no conclusion drawn`);
+      summary.waiting = mine.length;
       return summary;
     }
 
     const linked = new Set<number>();
-    for (const c of candidates) {
+    for (const c of lookup.candidates) {
       if (await d.store.findContractByDerivId(d.accountId, c.derivContractId)) linked.add(c.derivContractId);
     }
 
-    for (const intent of waiting) {
-      summary.checked++;
-      try {
-        await this.handle(intent, candidates, linked, now(), summary);
-      } catch (error) {
-        summary.skipped++;
-        this.log(`attempt ${intent.id} could not be settled this round: ${describe(error)}`);
+    // Pass 1: what does each attempt match?
+    const results = mine.map((intent) => ({
+      intent,
+      match: matchPurchase(
+        {
+          symbol: intent.symbol,
+          contractType: intent.contractType,
+          expectedPrice: new Decimal(intent.askPrice ?? intent.stake),
+          purchaseSentAt: intent.purchaseSentAt ?? intent.createdAt,
+        },
+        lookup.candidates,
+        { nowMs, isLinked: (id) => linked.has(id), waitMs: d.notPurchasedAfterMs ?? 120_000 },
+      ) as MatchResult,
+    }));
+
+    // Pass 2: if two attempts both match the same purchase, nobody can say which
+    // one really made it.
+    const claims = new Map<number, number>();
+    for (const { match } of results) {
+      if (match.kind === "found") {
+        claims.set(match.candidate.derivContractId, (claims.get(match.candidate.derivContractId) ?? 0) + 1);
       }
+    }
+
+    for (const { intent, match } of results) {
+      const contested = match.kind === "found" && (claims.get(match.candidate.derivContractId) ?? 0) > 1;
+      const final: MatchResult = contested ? { kind: "ambiguous", reason: "several_attempts" } : match;
+      await this.resolve(intent, final, summary);
     }
     return summary;
   }
 
-  private async fetchCandidates(sinceEpochSeconds: number): Promise<Candidate[] | null> {
-    const connection = this.deps.connection;
-    try {
-      const open = parsePortfolio(await connection.request({ portfolio: 1 }));
-      if (!open) return null;
-      const closed = parseProfitTable(
-        await connection.request({
-          profit_table: 1,
-          limit: PROFIT_TABLE_PAGE,
-          sort: "DESC",
-          date_from: String(sinceEpochSeconds),
-        }),
-      );
-      if (!closed) return null;
-      return [...open, ...closed];
-    } catch {
-      return null;
-    }
-  }
-
-  private async handle(
-    intent: Intent,
-    candidates: Candidate[],
-    linked: Set<number>,
-    nowMs: number,
-    summary: ReconcileSummary,
-  ): Promise<void> {
+  private async resolve(intent: Intent, match: MatchResult, summary: ReconcileSummary): Promise<void> {
     const d = this.deps;
-    const sentAt = intent.purchaseSentAt!.getTime();
-    const state = intent.state as Doubtful;
-
-    const match = matchPurchase(
-      {
-        symbol: intent.symbol,
-        contractType: intent.contractType,
-        stake: new Decimal(intent.stake),
-        askPrice: intent.askPrice === null ? null : new Decimal(intent.askPrice),
-        purchaseSentAtMs: sentAt,
-      },
-      candidates,
-      { nowMs, notPurchasedAfterMs: d.notPurchasedAfterMs ?? 120_000, linked },
-    );
-
-    switch (match.kind) {
-      case "too_early":
-        summary.skipped++;
-        return;
-
-      case "found": {
-        const c = match.candidate;
-        if (c.transactionId === null) {
-          await this.toReview(intent.id, state, "found_without_transaction_id");
-          summary.review++;
+    try {
+      switch (match.kind) {
+        case "too_early":
+          summary.waiting++;
+          return;
+        case "found": {
+          const c = match.candidate;
+          await d.store.confirmPurchase(intent.id, intent.state, {
+            derivContractId: c.derivContractId,
+            derivTransactionId: c.derivTransactionId,
+            buyPrice: c.buyPrice,
+            payout: null,
+            openedAt: c.purchaseTime,
+          });
+          d.watchContract(c.derivContractId);
+          summary.confirmed++;
+          this.log(`attempt ${intent.id} found at Deriv as contract ${c.derivContractId}`);
           return;
         }
-        await d.store.confirmPurchase(intent.id, state, {
-          derivContractId: c.derivContractId,
-          derivTransactionId: c.transactionId,
-          buyPrice: c.buyPrice,
-          payout: c.payout,
-          openedAt: new Date(c.purchaseTimeMs ?? sentAt),
-        });
-        linked.add(c.derivContractId);
-        d.connection.watchContract(c.derivContractId);
-        summary.confirmed++;
-        return;
+        case "not_found":
+          await this.toUncertain(intent);
+          await d.store.moveIntent(intent.id, "purchase_uncertain", "failed", {
+            stateReason: "verified_not_purchased",
+          });
+          summary.failed++;
+          return;
+        case "ambiguous":
+          await this.toUncertain(intent);
+          await d.store.moveIntent(intent.id, "purchase_uncertain", "needs_review", {
+            stateReason: `ambiguous_${match.reason}`,
+          });
+          summary.needsReview++;
+          this.log(`attempt ${intent.id} needs a person to look (${match.reason})`);
+          return;
       }
-
-      case "ambiguous":
-        await this.toReview(intent.id, state, "ambiguous_match");
-        summary.review++;
-        return;
-
-      case "not_found":
-        await this.viaUncertain(intent.id, state);
-        await d.store.moveIntent(intent.id, "purchase_uncertain", "failed", { stateReason: "not_found_at_deriv" });
-        summary.failed++;
-        return;
+    } catch (error) {
+      summary.errors++;
+      this.log(`could not resolve attempt ${intent.id}: ${error instanceof Error ? error.message : "unknown error"}`);
     }
   }
 
-  // "purchase_sent" must pass through "purchase_uncertain" first.
-  private async viaUncertain(id: string, state: Doubtful): Promise<void> {
-    if (state === "purchase_sent") {
-      await this.deps.store.moveIntent(id, "purchase_sent", "purchase_uncertain", {
-        stateReason: "reconcile_started",
-      });
+  private async toUncertain(intent: Intent): Promise<void> {
+    if (intent.state === "purchase_sent") {
+      await this.deps.store.moveIntent(intent.id, "purchase_sent", "purchase_uncertain", { stateReason: "reconcile" });
     }
-  }
-
-  private async toReview(id: string, state: Doubtful, reason: string): Promise<void> {
-    await this.viaUncertain(id, state);
-    await this.deps.store.moveIntent(id, "purchase_uncertain", "needs_review", { stateReason: reason });
   }
 
   private log(message: string): void {
@@ -185,6 +154,3 @@ export class Reconciler {
   }
 }
 
-function describe(error: unknown): string {
-  return error instanceof Error ? error.message : "unknown error";
-}

@@ -1,160 +1,145 @@
 import { eq } from "drizzle-orm";
+import { BUYING_ENABLED } from "./config.js";
 import { decryptSecret } from "./crypto/tokenCrypto.js";
-import { db, sql } from "./db/client.js";
+import { db } from "./db/client.js";
 import { derivConnections } from "./db/schema.js";
 import { AccountConnection } from "./deriv/accountConnection.js";
-import type { ConnectionStatus } from "./deriv/accountConnection.js";
+import { AccountRunner } from "./deriv/accountRunner.js";
 import { listAccounts } from "./deriv/client.js";
-import { ALLOW_REAL_ACCOUNTS } from "./deriv/connections.js";
 import { requestOtpUrl } from "./deriv/otp.js";
+import { createPurchaseLookup } from "./deriv/purchaseLookup.js";
+import { marketService } from "./market/index.js";
+import { getExecutableSignal } from "./signals/signalService.js";
 import { TradingEngine } from "./trading/engine.js";
 import { Reconciler } from "./trading/reconciler.js";
 import { denyAllUntilRiskEngine } from "./trading/riskPlaceholder.js";
-import {
-  applyReading,
-  confirmPurchase,
-  createIntent,
-  findContractByDerivId,
-  findIntentsNeedingReconciliation,
-  listUnsettledContracts,
-  moveIntent,
-} from "./trading/tradeStore.js";
+import * as store from "./trading/tradeStore.js";
 
-const RECONCILE_EVERY_MS = 30_000;
-const HEARTBEAT_EVERY_MS = 60_000;
+type Row = typeof derivConnections.$inferSelect;
 
 const log = (message: string) => console.log(`[worker] ${message}`);
+const describe = (error: unknown) => (error instanceof Error ? error.message : "unknown error");
 
-type Target = { userId: string; accountId: string; token: string };
+// One runner per customer with an active demo connection.
+const running = new Map<string, { runner: AccountRunner; fingerprint: string }>();
+// Connections skipped on purpose (real account, unreadable), so they are not retried every minute.
+const skipped = new Set<string>();
 
-const store = { createIntent, moveIntent, confirmPurchase, applyReading, findContractByDerivId };
+// Changes whenever the saved token or the selected account changes. Never logged.
+const fingerprintOf = (row: Row) => `${row.encryptedToken}|${row.selectedAccountId}`;
 
-// Every active connection whose selected account is a DEMO account.
-async function loadTargets(): Promise<Target[]> {
-  const rows = await db.select().from(derivConnections).where(eq(derivConnections.status, "active"));
-  const targets: Target[] = [];
+async function startFor(row: Row): Promise<void> {
+  const fingerprint = fingerprintOf(row);
+  if (skipped.has(fingerprint) || !row.selectedAccountId) return;
+  const userId = row.userId;
 
-  for (const row of rows) {
-    if (!row.selectedAccountId) continue;
-    let token: string;
-    try {
-      token = decryptSecret(row.encryptedToken, row.userId);
-    } catch {
-      log(`skipping a connection whose token cannot be read`);
-      continue;
-    }
-    const accounts = await listAccounts(token);
-    if (!accounts.ok) {
-      log(`skipping ${row.selectedAccountId}: Deriv says ${accounts.reason}`);
-      continue;
-    }
-    const account = accounts.accounts.find((a) => a.accountId === row.selectedAccountId);
-    if (!account) continue;
-    if (account.accountType !== "demo" || ALLOW_REAL_ACCOUNTS) {
-      log(`skipping ${account.accountId}: only demo accounts are handled`);
-      continue;
-    }
-    targets.push({ userId: row.userId, accountId: account.accountId, token });
+  let token: string;
+  try {
+    token = decryptSecret(row.encryptedToken, userId);
+  } catch {
+    log(`user ${userId}: saved token cannot be unlocked; skipping`);
+    skipped.add(fingerprint);
+    return;
   }
-  return targets;
-}
 
-type Running = { accountId: string; connection: AccountConnection; timer: NodeJS.Timeout };
-const running: Running[] = [];
+  const accounts = await listAccounts(token);
+  if (!accounts.ok) {
+    log(`user ${userId}: could not read accounts (${accounts.reason})`);
+    if (accounts.reason === "invalid_token") {
+      await db.update(derivConnections).set({ status: "invalid" }).where(eq(derivConnections.userId, userId));
+    }
+    return; // temporary problems are retried on the next sync
+  }
+  const account = accounts.accounts.find((a) => a.accountId === row.selectedAccountId);
+  if (!account || account.accountType !== "demo") {
+    log(`user ${userId}: selected account is not a demo account; skipping`);
+    skipped.add(fingerprint);
+    return;
+  }
+  const accountId = account.accountId;
 
-function startAccount(target: Target): void {
-  const { userId, accountId, token } = target;
-  let engine: TradingEngine;
-  let reconciler: Reconciler;
-  let timer: NodeJS.Timeout;
 
-  const connection: AccountConnection = new AccountConnection({
-    getUrl: () => requestOtpUrl({ token, accountId, accountType: "demo" }),
-    onStatus: (status) => void onStatus(status),
-    onContract: (contract) => {
-      engine.onContractUpdate(contract).catch((error) => log(`${accountId}: contract update failed: ${message(error)}`));
+  const runner = new AccountRunner({
+    create: (handlers) => {
+      const connection = new AccountConnection({
+        getUrl: () => requestOtpUrl({ token, accountId, accountType: "demo" }),
+        onStatus: handlers.onStatus,
+        onContract: handlers.onContract,
+      });
+      const engine = new TradingEngine({
+        userId,
+        accountId,
+        store,
+        buyingEnabled: () => BUYING_ENABLED,
+        riskGate: denyAllUntilRiskEngine,
+        getSignal: (id) => getExecutableSignal(id),
+        getContractTypes: (symbol) => marketService.getContractTypes(symbol),
+        connection,
+        log,
+      });
+      const reconciler = new Reconciler({
+        accountId,
+        userId,
+        store,
+        lookup: createPurchaseLookup(connection),
+        watchContract: (id) => connection.watchContract(id),
+        log,
+      });
+      return { connection, engine, reconciler };
     },
-  });
-
-  // The engine is built only to follow contracts. Its buying switch is fixed
-  // OFF, so this worker can never start a trade.
-  engine = new TradingEngine({
-    userId,
-    accountId,
-    store: store as unknown as ConstructorParameters<typeof TradingEngine>[0]["store"],
-    buyingEnabled: () => false,
-    riskGate: denyAllUntilRiskEngine,
-    getSignal: async () => null,
-    getContractTypes: async () => {
-      throw new Error("not available in the worker");
+    listUnsettledContractIds: () => store.listUnsettledContractIds(accountId),
+    onAuthFailed: async () => {
+      log(`user ${userId}: Deriv refused the token; marking the connection invalid`);
+      await db.update(derivConnections).set({ status: "invalid" }).where(eq(derivConnections.userId, userId));
     },
-    connection,
     log,
   });
 
-  reconciler = new Reconciler({
-    accountId,
-    connection,
-    store: { findIntentsNeedingReconciliation, moveIntent, confirmPurchase, findContractByDerivId },
-    log: (m) => log(`${accountId}: ${m}`),
-  });
-
-  async function onStatus(status: ConnectionStatus): Promise<void> {
-    log(`${accountId}: ${status}`);
-    if (status === "open") {
-      const unsettled = await listUnsettledContracts(accountId);
-      for (const c of unsettled) connection.watchContract(c.derivContractId);
-      log(`${accountId}: following ${unsettled.length} unfinished contract(s)`);
-    }
-    if (status === "auth_failed") {
-      clearInterval(timer);
-      await db.update(derivConnections).set({ status: "invalid" }).where(eq(derivConnections.userId, userId));
-      log(`${accountId}: Deriv refused the token. Connection marked invalid; this account is stopped.`);
-    }
-  }
-
-  timer = setInterval(() => {
-    reconciler
-      .reconcileOnce()
-      .then((s) => {
-        if (s.checked > 0) log(`${accountId}: doubt check ${JSON.stringify(s)}`);
-      })
-      .catch((error) => log(`${accountId}: doubt check failed: ${message(error)}`));
-  }, RECONCILE_EVERY_MS);
-
-  connection.start();
-  running.push({ accountId, connection, timer });
+  running.set(userId, { runner, fingerprint });
+  runner.start();
+  log(`user ${userId}: looking after demo account ${accountId}`);
 }
 
-function message(error: unknown): string {
-  return error instanceof Error ? error.message : "unknown error";
+// Starts runners for new connections and stops runners whose connection changed or went away.
+async function sync(): Promise<void> {
+  const rows = await db.select().from(derivConnections).where(eq(derivConnections.status, "active"));
+  const wanted = new Map(rows.filter((r) => r.selectedAccountId).map((r) => [r.userId, r]));
+
+  for (const [userId, entry] of running) {
+    const row = wanted.get(userId);
+    if (!row || entry.fingerprint !== fingerprintOf(row)) {
+      entry.runner.stop();
+      running.delete(userId);
+      log(`user ${userId}: stopped`);
+    }
+  }
+  for (const row of wanted.values()) {
+    if (running.has(row.userId)) continue;
+    try {
+      await startFor(row);
+    } catch (error) {
+      log(`user ${row.userId}: could not start (${describe(error)})`);
+    }
+  }
 }
 
 async function main(): Promise<void> {
-  log("starting. This worker never buys: it follows contracts and settles purchases left in doubt.");
-  const targets = await loadTargets();
-  log(`${targets.length} demo account(s) to look after`);
-  for (const t of targets) startAccount(t);
+  log(`starting. Buying is ${BUYING_ENABLED ? "ON" : "OFF"}; the risk gate refuses everything until Stage 9.`);
+  await sync();
+  const timer = setInterval(() => {
+    sync().catch((error) => log(`sync failed: ${describe(error)}`));
+  }, 60_000);
 
-  const heartbeat = setInterval(() => {
-    log(`alive: ${running.length} account(s), ${running.filter((r) => r.connection.getStatus() === "open").length} connected`);
-  }, HEARTBEAT_EVERY_MS);
-
-  async function shutdown(): Promise<void> {
-    log("stopping");
-    clearInterval(heartbeat);
-    for (const r of running) {
-      clearInterval(r.timer);
-      r.connection.stop();
-    }
-    await sql.end({ timeout: 5 });
+  const shutdown = () => {
+    clearInterval(timer);
+    for (const entry of running.values()) entry.runner.stop();
     process.exit(0);
-  }
-  process.on("SIGINT", () => void shutdown());
-  process.on("SIGTERM", () => void shutdown());
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
 }
 
 main().catch((error) => {
-  console.error("[worker] failed to start:", message(error));
+  log(`fatal: ${describe(error)}`);
   process.exit(1);
 });

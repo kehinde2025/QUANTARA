@@ -1,120 +1,78 @@
-import { z } from "zod";
-import { Decimal, fromDeriv, sameAmount } from "./money.js";
+import type { Decimal } from "decimal.js";
+import { sameAmount } from "./money.js";
 
-// One contract as Deriv lists it (open positions or closed history).
+// A purchase as seen in Deriv's own records.
 export type Candidate = {
   derivContractId: number;
-  transactionId: number | null;
+  derivTransactionId: number | null;
   buyPrice: Decimal;
-  purchaseTimeMs: number | null;
+  purchaseTime: Date;
   shortcode: string | null;
-  symbol: string | null;
   contractType: string | null;
-  payout: Decimal | null;
+  symbol: string | null;
 };
 
-// Only contract_id and buy_price are required. Everything else is read when
-// present. Field names beyond these are UNVERIFIED, so nothing else is assumed.
-const looseContract = z.object({
-  contract_id: z.number(),
-  buy_price: z.union([z.number(), z.string()]),
-  purchase_time: z.number().optional(),
-  transaction_id: z.number().optional(),
-  shortcode: z.string().optional(),
-  symbol: z.string().optional(),
-  underlying_symbol: z.string().optional(),
-  contract_type: z.string().optional(),
-  payout: z.union([z.number(), z.string()]).optional(),
-});
-
-function candidatesFrom(items: unknown[]): Candidate[] | null {
-  const out: Candidate[] = [];
-  for (const raw of items) {
-    const parsed = looseContract.safeParse(raw);
-    if (!parsed.success) return null; // one unreadable entry could be the one we need
-    const c = parsed.data;
-    const buyPrice = fromDeriv(c.buy_price);
-    if (!buyPrice) return null;
-    out.push({
-      derivContractId: c.contract_id,
-      transactionId: c.transaction_id ?? null,
-      buyPrice,
-      purchaseTimeMs: c.purchase_time !== undefined ? c.purchase_time * 1000 : null,
-      shortcode: c.shortcode ?? null,
-      symbol: c.underlying_symbol ?? c.symbol ?? null,
-      contractType: c.contract_type ?? null,
-      payout: c.payout !== undefined ? fromDeriv(c.payout) : null,
-    });
-  }
-  return out;
-}
-
-// Open positions. Returns null if the reply cannot be fully read.
-export function parsePortfolio(reply: Record<string, unknown>): Candidate[] | null {
-  if (reply.error) return null;
-  const portfolio = reply.portfolio as { contracts?: unknown } | undefined;
-  if (!portfolio || !Array.isArray(portfolio.contracts)) return null;
-  return candidatesFrom(portfolio.contracts);
-}
-
-// The most results asked for in one page of the closed-contract history.
-export const PROFIT_TABLE_PAGE = 500;
-
-// Closed contracts. Returns null if the reply cannot be fully read, or if the
-// page is full (older entries might be hidden, so nothing can be concluded).
-export function parseProfitTable(reply: Record<string, unknown>): Candidate[] | null {
-  if (reply.error) return null;
-  const table = reply.profit_table as { transactions?: unknown } | undefined;
-  if (!table || !Array.isArray(table.transactions)) return null;
-  if (table.transactions.length >= PROFIT_TABLE_PAGE) return null;
-  return candidatesFrom(table.transactions);
-}
-
-export type IntentSummary = {
+export type IntentFacts = {
   symbol: string;
   contractType: string;
-  stake: Decimal;
-  askPrice: Decimal | null;
-  purchaseSentAtMs: number;
+  expectedPrice: Decimal;
+  purchaseSentAt: Date;
 };
 
 export type MatchResult =
-  | { kind: "found"; candidate: Candidate }
-  | { kind: "ambiguous"; count: number }
+  | { kind: "found"; candidate: Candidate & { derivTransactionId: number } }
+  // Nothing matches yet, but not enough time has passed to be sure.
   | { kind: "too_early" }
-  | { kind: "not_found" };
+  // Nothing matches, and enough time has passed.
+  | { kind: "not_found" }
+  // Cannot tell. A person must look.
+  | {
+      kind: "ambiguous";
+      reason: "several_matches" | "missing_transaction_id" | "unidentifiable_candidate" | "several_attempts";
+    };
 
-// How far Deriv's clock and ours may differ. A cautious guess, UNVERIFIED.
-const CLOCK_ALLOWANCE_MS = 10_000;
+export type MatchOptions = {
+  nowMs: number;
+  // True if this Deriv contract already belongs to another attempt.
+  isLinked: (derivContractId: number) => boolean;
+  // Allowed difference between our clock and Deriv's.
+  skewMs?: number;
+  // How long to wait before concluding that nothing was bought.
+  waitMs?: number;
+};
 
-function sameShape(c: Candidate, intent: IntentSummary): boolean {
-  if (!sameAmount(c.buyPrice, intent.askPrice ?? intent.stake)) return false;
-  if (c.shortcode) return c.shortcode.startsWith(`${intent.contractType}_${intent.symbol}_`);
-  return c.symbol === intent.symbol && c.contractType === intent.contractType;
+const hasKind = (c: Candidate) => c.shortcode !== null || (c.contractType !== null && c.symbol !== null);
+
+// Deriv's shortcode starts with TYPE_SYMBOL_ (for example CALL_R_100_...). The
+// trailing underscore matters: it keeps R_10 apart from R_100.
+function sameKind(c: Candidate, intent: IntentFacts): boolean {
+  if (c.shortcode !== null) return c.shortcode.startsWith(`${intent.contractType}_${intent.symbol}_`);
+  return c.contractType === intent.contractType && c.symbol === intent.symbol;
 }
 
-// Decides what Deriv's records say about one doubtful purchase.
-export function matchPurchase(
-  intent: IntentSummary,
-  candidates: Candidate[],
-  opts: { nowMs: number; notPurchasedAfterMs: number; linked: Set<number> },
-): MatchResult {
-  const free = candidates.filter((c) => !opts.linked.has(c.derivContractId) && sameShape(c, intent));
+// Works out which of Deriv's purchases, if any, is the one an attempt sent.
+// A candidate that cannot be identified is treated as a POSSIBLE match, never
+// as "nothing": an unclear picture must not end in "not purchased".
+export function matchPurchase(intent: IntentFacts, candidates: Candidate[], opts: MatchOptions): MatchResult {
+  const skewMs = opts.skewMs ?? 5_000;
+  const waitMs = opts.waitMs ?? 120_000;
+  const from = intent.purchaseSentAt.getTime() - skewMs;
+  const to = opts.nowMs + skewMs;
 
-  const eligible = free.filter(
-    (c) =>
-      c.purchaseTimeMs !== null &&
-      c.purchaseTimeMs >= intent.purchaseSentAtMs - CLOCK_ALLOWANCE_MS &&
-      c.purchaseTimeMs <= opts.nowMs + CLOCK_ALLOWANCE_MS,
-  );
-  if (eligible.length === 1) return { kind: "found", candidate: eligible[0]! };
-  if (eligible.length > 1) return { kind: "ambiguous", count: eligible.length };
+  const inWindow = candidates.filter((c) => {
+    if (opts.isLinked(c.derivContractId)) return false;
+    const t = c.purchaseTime.getTime();
+    return t >= from && t <= to && sameAmount(c.buyPrice, intent.expectedPrice);
+  });
+  const possible = inWindow.filter((c) => !hasKind(c) || sameKind(c, intent));
 
-  // A contract of the right shape whose time cannot be checked: we cannot say
-  // it is not ours, so a human must look.
-  const unverifiable = free.filter((c) => c.purchaseTimeMs === null);
-  if (unverifiable.length > 0) return { kind: "ambiguous", count: unverifiable.length };
+  if (possible.length === 0) {
+    return opts.nowMs - intent.purchaseSentAt.getTime() < waitMs ? { kind: "too_early" } : { kind: "not_found" };
+  }
+  if (possible.length > 1) return { kind: "ambiguous", reason: "several_matches" };
 
-  if (opts.nowMs - intent.purchaseSentAtMs < opts.notPurchasedAfterMs) return { kind: "too_early" };
-  return { kind: "not_found" };
+  const only = possible[0]!;
+  if (!hasKind(only)) return { kind: "ambiguous", reason: "unidentifiable_candidate" };
+  if (only.derivTransactionId === null) return { kind: "ambiguous", reason: "missing_transaction_id" };
+  return { kind: "found", candidate: { ...only, derivTransactionId: only.derivTransactionId } };
 }

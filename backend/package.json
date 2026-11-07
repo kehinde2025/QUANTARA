@@ -16,7 +16,7 @@
     "market:live": "tsx src/market/liveCheck.ts",
     "signals:replay": "tsx src/signals/replayCheck.ts",
     "deriv:live": "tsx src/deriv/liveAccountCheck.ts",
-    "worker": "tsx watch src/worker.ts"
+    "worker:dev": "tsx watch src/worker.ts"
   },
   "dependencies": {
     "argon2": "^0.45.1",

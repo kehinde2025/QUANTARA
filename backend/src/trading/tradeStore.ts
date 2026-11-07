@@ -226,9 +226,12 @@ export async function findContractByDerivId(accountId: string, derivContractId: 
 
 // Contracts that have not finished yet (or whose figures looked wrong), for
 // one account. After a restart the worker follows these again.
-export async function listUnsettledContracts(accountId: string): Promise<Contract[]> {
-  return db
-    .select()
+// Deriv ids of this account's contracts that are not settled yet. The worker
+// follows these again after every restart or reconnect.
+export async function listUnsettledContractIds(accountId: string): Promise<number[]> {
+  const rows = await db
+    .select({ id: contracts.derivContractId })
     .from(contracts)
     .where(and(eq(contracts.accountId, accountId), inArray(contracts.status, ["open", "awaiting_settlement", "unknown"])));
+  return rows.map((row) => row.id);
 }
