@@ -7,6 +7,7 @@ import type { Intent, findIntentsNeedingReconciliation } from "./tradeStore.js";
 
 export type ReconcilerDeps = {
   accountId: string;
+  userId: string;
   store: Pick<TradeStorePort, "moveIntent" | "confirmPurchase" | "findContractByDerivId"> & {
     findIntentsNeedingReconciliation: typeof findIntentsNeedingReconciliation;
   };

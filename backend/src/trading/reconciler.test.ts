@@ -26,6 +26,7 @@ type FakeIntent = {
 
 const makeIntent = (id: string, over: Partial<FakeIntent> = {}): FakeIntent => ({
   id,
+  userId: "user-1",
   accountId: ACCOUNT,
   symbol: "R_100",
   contractType: "CALL",
@@ -36,7 +37,6 @@ const makeIntent = (id: string, over: Partial<FakeIntent> = {}): FakeIntent => (
   purchaseSentAt: new Date(BASE),
   createdAt: new Date(BASE - 1000),
   ...over,
-  userId: "user-1",
 });
 
 const makeCandidate = (over: Partial<Candidate> = {}): Candidate => ({
@@ -93,6 +93,7 @@ function setup(lookupResult: LookupResult, nowOffsetMs: number) {
   let lookups = 0;
   const reconciler = new Reconciler({
     accountId: ACCOUNT,
+    userId: "user-1",
     store: store as unknown as ReconcilerDeps["store"],
     lookup: async () => {
       lookups++;
@@ -185,6 +186,15 @@ describe("Reconciler", () => {
     expect(t.watched).toEqual([]);
   });
 
+  it("ignores attempts that belong to another account", async () => {
+    const t = setup(ok([makeCandidate()]), 200_000);
+    t.store.intents.push(makeIntent("a", { accountId: "DOT0000002" }));
+    const summary = await t.reconciler.reconcileOnce();
+    expect(summary.checked).toBe(0);
+    expect(t.store.intents[0]!.state).toBe("purchase_sent");
+  });
+
+
   it("ignores attempts that belong to another customer, even on the same account", async () => {
     const t = setup(ok([makeCandidate()]), 200_000);
     t.store.intents.push(makeIntent("a", { userId: "someone-else" }));
@@ -192,7 +202,6 @@ describe("Reconciler", () => {
     expect(summary.checked).toBe(0);
     expect(t.store.intents[0]!.state).toBe("purchase_sent");
   });
-
   it("keeps going when one attempt cannot be recorded", async () => {
     const putCandidate = makeCandidate({
       derivContractId: 17000299700,
